@@ -169,6 +169,11 @@ async def create_meeting_page(parent_page_id, meeting_data, transcript, full_mar
         "parent": {
             "page_id": parent_page_id
         },
+        "icon": {
+            "external": {
+                "url": "https://i.imgur.com/pFbQrWe.png"
+            }
+        },
         "properties": {
             "title": {
                 "title": [
