@@ -89,21 +89,21 @@ async def find_page_by_email(email):
 
 # Função para atualizar status e transcrição
 def build_transcript(transcript_data):
-    if not transcript_data:
+    if not transcript_data or "speaker_blocks" not in transcript_data:
         return "Transcrição não disponível"
         
-    # Ordenar a transcrição por timestamp
-    sorted_transcript = sorted(transcript_data, key=lambda x: x.get("timestamp", ""))
-    
     # Construir a transcrição formatada
     formatted_transcript = []
-    for entry in sorted_transcript:
-        speaker = entry.get("speaker", "Desconhecido")
-        text = entry.get("text", "")
-        timestamp = entry.get("timestamp", "")
-        if timestamp:
+    for block in transcript_data["speaker_blocks"]:
+        speaker = block.get("speaker", {}).get("name", "Desconhecido")
+        words = block.get("words", "")
+        start_time = block.get("start_time", "")
+        
+        if start_time:
             try:
-                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                # Converter timestamp para datetime
+                timestamp_ms = int(start_time)
+                dt = datetime.fromtimestamp(timestamp_ms / 1000)
                 local_time = dt.astimezone(TZ)
                 timestamp_str = local_time.strftime("%H:%M:%S")
             except:
@@ -111,7 +111,7 @@ def build_transcript(transcript_data):
         else:
             timestamp_str = ""
             
-        formatted_line = f"[{timestamp_str}] {speaker}: {text}"
+        formatted_line = f"[{timestamp_str}] {speaker}: {words}"
         formatted_transcript.append(formatted_line)
     
     return "\n".join(formatted_transcript)
@@ -163,7 +163,12 @@ async def create_meeting_page(parent_page_id, meeting_data, transcript, full_mar
     create_url = "https://api.notion.com/v1/pages"
     logger.info(f"Creating meeting page under parent ID: {parent_page_id}")
     
-    title = f"Reunião: {meeting_data.get('title', 'Sem título')} - {meeting_data.get('start_time', '')[:10]}"
+    # Usar o título original da reunião
+    title = meeting_data.get("title", "Sem título")
+    
+    # Converter o markdown em blocos rich_text
+    markdown_blocks = markdown_to_notion_rich_text(full_markdown)
+    transcript_blocks = markdown_to_notion_rich_text(transcript)
     
     create_data = {
         "parent": {
@@ -193,30 +198,23 @@ async def create_meeting_page(parent_page_id, meeting_data, transcript, full_mar
         "children": [
             {
                 "object": "block",
-                "type": "heading_1",
-                "heading_1": {
-                    "rich_text": [{"type": "text", "text": {"content": "Transcrição"}}]
-                }
-            },
-            {
-                "object": "block",
                 "type": "paragraph",
                 "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": transcript}}]
+                    "rich_text": markdown_blocks
                 }
             },
             {
                 "object": "block",
                 "type": "heading_1",
                 "heading_1": {
-                    "rich_text": [{"type": "text", "text": {"content": "Resumo Completo"}}]
+                    "rich_text": [{"type": "text", "text": {"content": "🗣️ Transcript"}}]
                 }
             },
             {
                 "object": "block",
                 "type": "paragraph",
                 "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": full_markdown}}]
+                    "rich_text": transcript_blocks
                 }
             }
         ]
@@ -293,7 +291,7 @@ async def webhook(request: Request):
             raise HTTPException(status_code=404, detail=error_msg)
             
         # 3. Monta a transcrição
-        transcript = build_transcript(data.get("transcript"))
+        transcript = build_transcript(data)
         logger.info(f"Built transcript, length: {len(transcript)}")
         
         # 4. Monta o resumo completo
@@ -347,45 +345,72 @@ async def webhook(request: Request):
 def build_full_meeting_markdown(data):
     sections = []
     
-    # Título e Data
+    # Título e Informações Básicas
     title = data.get("title", "Sem título")
     start_time = data.get("start_time", "")
-    if start_time:
-        try:
-            dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-            local_time = dt.astimezone(TZ)
-            date_str = local_time.strftime("%d/%m/%Y %H:%M")
-        except:
-            date_str = start_time
+    end_time = data.get("end_time", "")
+    report_url = data.get("report_url", "")
+    
+    # Cabeçalho
+    sections.append(f"# {title}\n")
+    
+    # Link para o relatório
+    if report_url:
+        sections.append(f"**Meeting:** [{title}]({report_url})")
     else:
-        date_str = "Data não disponível"
-        
-    sections.append(f"# {title}\nData: {date_str}\n")
+        sections.append(f"**Meeting:** {title}")
+    
+    # Data e hora do evento
+    if start_time and end_time:
+        try:
+            start_dt = datetime.fromisoformat(start_time.rstrip('Z'))
+            end_dt = datetime.fromisoformat(end_time.rstrip('Z'))
+            start_local = start_dt.astimezone(TZ)
+            end_local = end_dt.astimezone(TZ)
+            event_time = f"{start_local.strftime('%Y-%m-%d %I:%M %p')} - {end_local.strftime('%I:%M %p')} ({TZ.zone})"
+            sections.append(f"**Event time:** {event_time}")
+        except:
+            sections.append(f"**Event time:** {start_time} - {end_time}")
     
     # Participantes
     participants = data.get("participants", [])
     if participants:
-        sections.append("## Participantes")
-        for p in participants:
-            name = p.get("name", "")
-            email = p.get("email", "")
-            sections.append(f"- {name} ({email})")
-        sections.append("")
+        sections.append(f"**Participants:** {', '.join(p.get('name', '') for p in participants)}\n")
     
-    # Tópicos
-    topics = data.get("topics", [])
-    if topics:
-        sections.append("## Tópicos Discutidos")
-        for topic in topics:
-            sections.append(f"- {topic.get('text', '')}")
-        sections.append("")
+    # Resumo
+    summary = data.get("summary", "")
+    if summary:
+        sections.append("## ✨ Summary\n")
+        sections.append(f"{summary}\n")
+    
+    # Capítulos e Tópicos
+    chapter_summaries = data.get("chapter_summaries", [])
+    if chapter_summaries:
+        sections.append("## 💬 Chapters & Topics\n")
+        for chapter in chapter_summaries:
+            title = chapter.get("title", "")
+            description = chapter.get("description", "")
+            chapter_topics = chapter.get("topics", [])
+            
+            sections.append(f"**{title}** [{description}]")
+            for topic in chapter_topics:
+                sections.append(f"- {topic.get('text', '')}")
+            sections.append("")
     
     # Action Items
     action_items = data.get("action_items", [])
     if action_items:
-        sections.append("## Próximos Passos")
+        sections.append("## ✅ Action Items\n")
         for item in action_items:
-            sections.append(f"- {item.get('text', '')}")
+            sections.append(f"- [ ] {item.get('text', '')}")
+        sections.append("")
+    
+    # Key Questions
+    key_questions = data.get("key_questions", [])
+    if key_questions:
+        sections.append("## 🔍 Key Questions\n")
+        for question in key_questions:
+            sections.append(f"- {question.get('text', '')}")
         sections.append("")
     
     return "\n".join(sections) 
