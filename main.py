@@ -70,11 +70,19 @@ async def find_page_by_email(email):
             
             if not data.get("results"):
                 logger.warning(f"No results found for email: {email}")
-                return None
+                return None, None
             
-            page_id = data["results"][0]["id"]
-            logger.info(f"Found Notion page ID: {page_id}")
-            return page_id
+            # Get both the page ID and the Page ID property
+            page = data["results"][0]
+            page_id = page["id"]
+            parent_page_id = page["properties"].get("Page ID", {}).get("formula", {}).get("string")
+            
+            if not parent_page_id:
+                logger.error("Page ID property not found or empty")
+                return None, None
+                
+            logger.info(f"Found Notion page ID: {page_id} with Parent Page ID: {parent_page_id}")
+            return page_id, parent_page_id
     except Exception as e:
         logger.error(f"Error searching Notion: {str(e)}")
         raise
@@ -131,26 +139,89 @@ def markdown_to_notion_rich_text(text, chunk_size=2000):
         blocks.append(current_block)
     return blocks
 
-async def update_notion_page(page_id, status, transcript, full_markdown):
+async def create_meeting_page(parent_page_id, meeting_data, transcript, full_markdown):
+    create_url = "https://api.notion.com/v1/pages"
+    logger.info(f"Creating meeting page under parent ID: {parent_page_id}")
+    
+    title = f"Reunião: {meeting_data.get('title', 'Sem título')} - {meeting_data.get('start_time', '')[:10]}"
+    
+    create_data = {
+        "parent": {
+            "page_id": parent_page_id
+        },
+        "properties": {
+            "title": {
+                "title": [
+                    {
+                        "text": {
+                            "content": title
+                        }
+                    }
+                ]
+            }
+        },
+        "children": [
+            {
+                "object": "block",
+                "type": "heading_1",
+                "heading_1": {
+                    "rich_text": [{"type": "text", "text": {"content": "Transcrição"}}]
+                }
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": transcript}}]
+                }
+            },
+            {
+                "object": "block",
+                "type": "heading_1",
+                "heading_1": {
+                    "rich_text": [{"type": "text", "text": {"content": "Resumo Completo"}}]
+                }
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": full_markdown}}]
+                }
+            }
+        ]
+    }
+    
+    logger.info(f"Create data: {json.dumps(create_data, default=str)}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(create_url, json=create_data, headers=notion_headers())
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Created meeting page with ID: {result.get('id')}")
+            return result.get('id')
+    except Exception as e:
+        logger.error(f"Error creating meeting page: {str(e)}")
+        raise
+
+async def update_lead_status(page_id, status="Reunião Realizada"):
     update_url = f"https://api.notion.com/v1/pages/{page_id}"
-    logger.info(f"Updating Notion page: {page_id}")
+    logger.info(f"Updating lead status for page: {page_id}")
     
     update_data = {
         "properties": {
-            "Status": {"status": {"name": status}},
-            "Transcrição": {"rich_text": markdown_to_notion_rich_text(transcript)},
-            "Resumo Completo": {"rich_text": markdown_to_notion_rich_text(full_markdown)}
+            "Status": {"status": {"name": status}}
         }
     }
-    logger.info(f"Update data: {json.dumps(update_data, default=str)}")
     
     try:
         async with httpx.AsyncClient() as client:
             response = await client.patch(update_url, json=update_data, headers=notion_headers())
             response.raise_for_status()
-            logger.info(f"Notion update response: {json.dumps(response.json(), default=str)}")
+            logger.info("Successfully updated lead status")
     except Exception as e:
-        logger.error(f"Error updating Notion: {str(e)}")
+        logger.error(f"Error updating lead status: {str(e)}")
         raise
 
 # Função para enviar mensagem WhatsApp via Z-API para múltiplos números
@@ -179,9 +250,9 @@ async def webhook(request: Request):
         email = data["owner"]["email"]
         logger.info(f"Processing meeting for email: {email}")
         
-        # 2. Busca a página no Notion
-        page_id = await find_page_by_email(email)
-        if not page_id:
+        # 2. Busca a página no Notion e o Page ID
+        page_id, parent_page_id = await find_page_by_email(email)
+        if not page_id or not parent_page_id:
             error_msg = f"Linha não encontrada para o e-mail: {email}"
             logger.error(error_msg)
             raise HTTPException(status_code=404, detail=error_msg)
@@ -194,15 +265,23 @@ async def webhook(request: Request):
         full_markdown = build_full_meeting_markdown(data)
         logger.info(f"Built full markdown, length: {len(full_markdown)}")
         
-        # 5. Atualiza status e transcrição
+        # 5. Cria uma nova página para a reunião
         try:
-            await update_notion_page(page_id, "Reunião Realizada", transcript, full_markdown)
-            logger.info("Successfully updated Notion page")
+            await create_meeting_page(parent_page_id, data, transcript, full_markdown)
+            logger.info("Successfully created meeting page")
         except Exception as e:
-            logger.error(f"Failed to update Notion: {str(e)}")
+            logger.error(f"Failed to create meeting page: {str(e)}")
             raise
             
-        # 6. Monta mensagem WhatsApp
+        # 6. Atualiza o status do lead
+        try:
+            await update_lead_status(page_id)
+            logger.info("Successfully updated lead status")
+        except Exception as e:
+            logger.error(f"Failed to update lead status: {str(e)}")
+            raise
+            
+        # 7. Monta mensagem WhatsApp
         owner = data["owner"]["name"]
         lead = next((p["name"] for p in data.get("participants", []) if p["email"] != email), "Lead")
         assunto = ", ".join([t["text"] for t in data.get("topics", [])])
@@ -217,7 +296,7 @@ async def webhook(request: Request):
         )
         logger.info(f"Prepared WhatsApp message: {whatsapp_msg}")
         
-        # 7. Envia WhatsApp para todos os admins
+        # 8. Envia WhatsApp para todos os admins
         try:
             await send_whatsapp_message_to_admins(whatsapp_msg)
             logger.info("Successfully sent WhatsApp messages")
