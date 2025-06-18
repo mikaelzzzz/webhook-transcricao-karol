@@ -43,7 +43,8 @@ def notion_headers():
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept-Charset": "utf-8"
     }
     logger.info(f"Using Notion headers: {json.dumps(headers, default=str)}")
     return headers
