@@ -89,12 +89,32 @@ async def find_page_by_email(email):
 
 # Função para atualizar status e transcrição
 def build_transcript(transcript_data):
-    # Concatena as falas dos speakers
-    if not transcript_data or "speaker_blocks" not in transcript_data:
-        return ""
-    return "\n".join([
-        f"{block['speaker']['name']}: {block['words']}" for block in transcript_data["speaker_blocks"]
-    ])
+    if not transcript_data:
+        return "Transcrição não disponível"
+        
+    # Ordenar a transcrição por timestamp
+    sorted_transcript = sorted(transcript_data, key=lambda x: x.get("timestamp", ""))
+    
+    # Construir a transcrição formatada
+    formatted_transcript = []
+    for entry in sorted_transcript:
+        speaker = entry.get("speaker", "Desconhecido")
+        text = entry.get("text", "")
+        timestamp = entry.get("timestamp", "")
+        if timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                local_time = dt.astimezone(TZ)
+                timestamp_str = local_time.strftime("%H:%M:%S")
+            except:
+                timestamp_str = ""
+        else:
+            timestamp_str = ""
+            
+        formatted_line = f"[{timestamp_str}] {speaker}: {text}"
+        formatted_transcript.append(formatted_line)
+    
+    return "\n".join(formatted_transcript)
 
 def markdown_to_notion_rich_text(text, chunk_size=2000):
     """
@@ -310,48 +330,47 @@ async def webhook(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 def build_full_meeting_markdown(data):
-    title = data.get("title", "Reunião")
-    report_url = data.get("report_url", "#")
+    sections = []
+    
+    # Título e Data
+    title = data.get("title", "Sem título")
     start_time = data.get("start_time", "")
-    end_time = data.get("end_time", "")
-    platform = "Zoom"
-    participants = ", ".join([p["name"] for p in data.get("participants", [])])
-    summary = data.get("summary", "")
-    chapters = ""
-    for chapter in data.get("chapter_summaries", []):
-        chapters += f"**{chapter['title']}**\n{chapter['description']}\n"
-        for topic in chapter.get("topics", []):
-            chapters += f"- {topic['text']}\n"
-        chapters += "\n"
-    action_items = ""
-    for a in data.get("action_items", []):
-        action_items += f"- [ ] {a['text']}\n"
-    key_questions = ""
-    for k in data.get("key_questions", []):
-        key_questions += f"- {k['text']}\n"
-    transcript = ""
-    if data.get("transcript") and data["transcript"].get("speaker_blocks"):
-        for block in data["transcript"]["speaker_blocks"]:
-            transcript += f"**{block['speaker']['name']}:** {block['words']}\n\n"
-    md = f"""# {start_time[:10]} {title}
-**Meeting:** [{title}]({report_url})
-**Event time:** {start_time} - {end_time}
-**Platform:** {platform}
-**Participants:** {participants}
-
-## **✨ Summary**
-{summary}
-
-## **💬 Chapters & Topics**
-{chapters}
-
-## **✅ Action Items**
-{action_items}
-
-## **🔍 Key Questions**
-{key_questions}
-
-## **🗣️ Transcript**
-{transcript}
-"""
-    return md 
+    if start_time:
+        try:
+            dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            local_time = dt.astimezone(TZ)
+            date_str = local_time.strftime("%d/%m/%Y %H:%M")
+        except:
+            date_str = start_time
+    else:
+        date_str = "Data não disponível"
+        
+    sections.append(f"# {title}\nData: {date_str}\n")
+    
+    # Participantes
+    participants = data.get("participants", [])
+    if participants:
+        sections.append("## Participantes")
+        for p in participants:
+            name = p.get("name", "")
+            email = p.get("email", "")
+            sections.append(f"- {name} ({email})")
+        sections.append("")
+    
+    # Tópicos
+    topics = data.get("topics", [])
+    if topics:
+        sections.append("## Tópicos Discutidos")
+        for topic in topics:
+            sections.append(f"- {topic.get('text', '')}")
+        sections.append("")
+    
+    # Action Items
+    action_items = data.get("action_items", [])
+    if action_items:
+        sections.append("## Próximos Passos")
+        for item in action_items:
+            sections.append(f"- {item.get('text', '')}")
+        sections.append("")
+    
+    return "\n".join(sections) 
