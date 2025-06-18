@@ -6,6 +6,8 @@ import re
 import logging
 import json
 from datetime import datetime
+import openai
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +39,11 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN")
 ADMIN_PHONES = [p.strip() for p in os.getenv("ADMIN_PHONES", "").split(",") if p]
 TZ = pytz.timezone(os.getenv("TZ", "America/Sao_Paulo"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
 
 # Função para buscar a página no Notion pelo email
 def notion_headers():
@@ -299,6 +306,10 @@ async def webhook(request: Request):
         full_markdown = build_full_meeting_markdown(data)
         logger.info(f"Built full markdown, length: {len(full_markdown)}")
         
+        # 4.1 Analisa objeções via LLM
+        observation_msg = await analyze_objections(data.get("summary", ""), transcript)
+        logger.info(f"Observation message from LLM: {observation_msg}")
+        
         # 5. Cria uma nova página para a reunião
         try:
             await create_meeting_page(parent_page_id, data, transcript, full_markdown)
@@ -327,7 +338,7 @@ async def webhook(request: Request):
             f"🎯 *Lead:* {lead}\n\n"
             f"📝 *Assuntos Abordados:*\n{assunto}\n\n"
             f"✅ *Próximas Etapas:*{proximas_etapas}\n\n"
-            f"💫 *Observação:* O Lead demonstra potencial para fechamento devido ao interesse demonstrado durante a reunião."
+            f"💫 *Observação:* {observation_msg}"
         )
         logger.info(f"Prepared WhatsApp message: {whatsapp_msg}")
         
@@ -415,4 +426,45 @@ def build_full_meeting_markdown(data):
             sections.append(f"- {question.get('text', '')}")
         sections.append("")
     
-    return "\n".join(sections) 
+    return "\n".join(sections)
+
+async def analyze_objections(summary_text: str, transcript_text: str) -> str:
+    """Analisa objeções usando GPT-4o e devolve o bloco para WhatsApp."""
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY não definido; pulando análise de objeções")
+        return "Análise indisponível."
+
+    prompt = f"""Você é um especialista em objeções do método "Liberdade se Compra Vendendo".
+
+TAREFA  
+1. Detecte e liste **no máximo 3 objeções reais (O)** citadas pelo cliente.  
+2. Para cada objeção real indique, em uma palavra, se o vendedor aplicou: Empatia / Isolar / Minimizar / Pedir (use "✔" ou "✖").  
+3. Gere **uma única mensagem** de até **450 caracteres**, em português, para ser colada no campo **Observação** do WhatsApp, seguindo este formato EXATO (sem linhas extras):
+👀 Objeções:  
+• {{objeção 1 – categoria – ✓/✖/✖/✓}}  
+• {{objeção 2 – categoria – ✓/✓/✖/✖}}  
+🎯 Próx. passo: {{ação direta e data ou pergunta presuntiva}}
+»
+
+4. Não inclua explicações, cabeçalhos ou JSON; devolva **somente** o bloco entre «».  
+5. Se não houver objeção real, escreva:  
+«Nenhuma objeção real detectada. Continuar follow-up habitual.»
+
+Resumo da reunião:
+{summary_text}
+
+Transcrição:
+{transcript_text}"""
+
+    try:
+        response = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=512,
+        )
+        content = response.choices[0].message.content.strip()
+        return content
+    except Exception as e:
+        logger.error(f"Erro ao gerar análise de objeções: {e}")
+        return "Análise indisponível." 
