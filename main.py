@@ -319,14 +319,15 @@ async def webhook(request: Request):
         owner = data["owner"]["name"]
         lead = next((p["name"] for p in data.get("participants", []) if p["email"] != email), "Lead")
         assunto = ", ".join([t["text"] for t in data.get("topics", [])])
-        proximas_etapas = ", ".join([a["text"] for a in data.get("action_items", [])])
-        motivo = "Motivo XYZ"  # Personalize conforme necessário
+        proximas_etapas = "\n• " + "\n• ".join([a["text"] for a in data.get("action_items", [])])
         
         whatsapp_msg = (
-            f"{owner} realizou a reunião com o Lead {lead}. "
-            f"O assunto abordado foi {assunto}. "
-            f"As próximas etapas são {proximas_etapas}. "
-            f"O Lead demonstra altas chances de fechar negócio por conta de {motivo}."
+            f"🤝 *Nova Reunião Realizada*\n\n"
+            f"👤 *Responsável:* {owner}\n"
+            f"🎯 *Lead:* {lead}\n\n"
+            f"📝 *Assuntos Abordados:*\n{assunto}\n\n"
+            f"✅ *Próximas Etapas:*{proximas_etapas}\n\n"
+            f"💫 *Observação:* O Lead demonstra potencial para fechamento devido ao interesse demonstrado durante a reunião."
         )
         logger.info(f"Prepared WhatsApp message: {whatsapp_msg}")
         
