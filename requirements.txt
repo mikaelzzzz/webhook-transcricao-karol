@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 httpx
 pytz
-openai 
+openai==0.28.1 
