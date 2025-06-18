@@ -3,6 +3,13 @@ import httpx
 import os
 import pytz
 import re
+import logging
+import json
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Read.ai Webhook Integration",
@@ -33,25 +40,44 @@ TZ = pytz.timezone(os.getenv("TZ", "America/Sao_Paulo"))
 
 # Função para buscar a página no Notion pelo email
 def notion_headers():
-    return {
+    headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json"
     }
+    logger.info(f"Using Notion headers: {json.dumps(headers, default=str)}")
+    return headers
 
 async def find_page_by_email(email):
     search_url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    async with httpx.AsyncClient() as client:
-        response = await client.post(search_url, json={
-            "filter": {
-                "property": "Email",
-                "email": {"equals": email}
-            }
-        }, headers=notion_headers())
-        data = response.json()
-        if not data.get("results"):
-            return None
-        return data["results"][0]["id"]
+    logger.info(f"Searching Notion for email: {email}")
+    logger.info(f"Using database ID: {NOTION_DATABASE_ID}")
+    
+    search_body = {
+        "filter": {
+            "property": "Email",
+            "email": {"equals": email}
+        }
+    }
+    logger.info(f"Search body: {json.dumps(search_body, default=str)}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(search_url, json=search_body, headers=notion_headers())
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Notion search response: {json.dumps(data, default=str)}")
+            
+            if not data.get("results"):
+                logger.warning(f"No results found for email: {email}")
+                return None
+            
+            page_id = data["results"][0]["id"]
+            logger.info(f"Found Notion page ID: {page_id}")
+            return page_id
+    except Exception as e:
+        logger.error(f"Error searching Notion: {str(e)}")
+        raise
 
 # Função para atualizar status e transcrição
 def build_transcript(transcript_data):
@@ -107,14 +133,25 @@ def markdown_to_notion_rich_text(text, chunk_size=2000):
 
 async def update_notion_page(page_id, status, transcript, full_markdown):
     update_url = f"https://api.notion.com/v1/pages/{page_id}"
-    async with httpx.AsyncClient() as client:
-        await client.patch(update_url, json={
-            "properties": {
-                "Status": {"status": {"name": status}},
-                "Transcrição": {"rich_text": markdown_to_notion_rich_text(transcript)},
-                "Resumo Completo": {"rich_text": markdown_to_notion_rich_text(full_markdown)}
-            }
-        }, headers=notion_headers())
+    logger.info(f"Updating Notion page: {page_id}")
+    
+    update_data = {
+        "properties": {
+            "Status": {"status": {"name": status}},
+            "Transcrição": {"rich_text": markdown_to_notion_rich_text(transcript)},
+            "Resumo Completo": {"rich_text": markdown_to_notion_rich_text(full_markdown)}
+        }
+    }
+    logger.info(f"Update data: {json.dumps(update_data, default=str)}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(update_url, json=update_data, headers=notion_headers())
+            response.raise_for_status()
+            logger.info(f"Notion update response: {json.dumps(response.json(), default=str)}")
+    except Exception as e:
+        logger.error(f"Error updating Notion: {str(e)}")
+        raise
 
 # Função para enviar mensagem WhatsApp via Z-API para múltiplos números
 async def send_whatsapp_message_to_admins(message):
@@ -134,36 +171,63 @@ async def send_whatsapp_message_to_admins(message):
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
     try:
+        data = await request.json()
+        logger.info(f"Received webhook data: {json.dumps(data, default=str)}")
+        
         # 1. Pega o email do owner da reunião
         email = data["owner"]["email"]
+        logger.info(f"Processing meeting for email: {email}")
+        
         # 2. Busca a página no Notion
         page_id = await find_page_by_email(email)
         if not page_id:
-            raise Exception(f"Linha não encontrada para o e-mail: {email}")
+            error_msg = f"Linha não encontrada para o e-mail: {email}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=404, detail=error_msg)
+            
         # 3. Monta a transcrição
         transcript = build_transcript(data.get("transcript"))
+        logger.info(f"Built transcript, length: {len(transcript)}")
+        
         # 4. Monta o resumo completo
         full_markdown = build_full_meeting_markdown(data)
+        logger.info(f"Built full markdown, length: {len(full_markdown)}")
+        
         # 5. Atualiza status e transcrição
-        await update_notion_page(page_id, "Reunião Realizada", transcript, full_markdown)
+        try:
+            await update_notion_page(page_id, "Reunião Realizada", transcript, full_markdown)
+            logger.info("Successfully updated Notion page")
+        except Exception as e:
+            logger.error(f"Failed to update Notion: {str(e)}")
+            raise
+            
         # 6. Monta mensagem WhatsApp
         owner = data["owner"]["name"]
         lead = next((p["name"] for p in data.get("participants", []) if p["email"] != email), "Lead")
         assunto = ", ".join([t["text"] for t in data.get("topics", [])])
         proximas_etapas = ", ".join([a["text"] for a in data.get("action_items", [])])
         motivo = "Motivo XYZ"  # Personalize conforme necessário
+        
         whatsapp_msg = (
             f"{owner} realizou a reunião com o Lead {lead}. "
             f"O assunto abordado foi {assunto}. "
             f"As próximas etapas são {proximas_etapas}. "
             f"O Lead demonstra altas chances de fechar negócio por conta de {motivo}."
         )
+        logger.info(f"Prepared WhatsApp message: {whatsapp_msg}")
+        
         # 7. Envia WhatsApp para todos os admins
-        await send_whatsapp_message_to_admins(whatsapp_msg)
+        try:
+            await send_whatsapp_message_to_admins(whatsapp_msg)
+            logger.info("Successfully sent WhatsApp messages")
+        except Exception as e:
+            logger.error(f"Failed to send WhatsApp messages: {str(e)}")
+            raise
+            
         return {"ok": True}
     except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 def build_full_meeting_markdown(data):
