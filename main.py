@@ -4,7 +4,23 @@ import os
 import pytz
 import re
 
-app = FastAPI()
+app = FastAPI(
+    title="Read.ai Webhook Integration",
+    description="Webhook integration between Read.ai, Notion, and WhatsApp",
+    version="1.0.0"
+)
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "Read.ai Webhook Integration",
+        "endpoints": {
+            "/webhook": "POST - Receives Read.ai meeting end webhooks",
+            "/docs": "GET - OpenAPI documentation",
+            "/redoc": "GET - ReDoc documentation"
+        }
+    }
 
 # Variáveis de ambiente
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
