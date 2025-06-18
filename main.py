@@ -240,6 +240,11 @@ async def update_lead_status(page_id, status="Reunião Realizada"):
     logger.info(f"Updating lead status for page: {page_id}")
     
     update_data = {
+        "icon": {
+            "external": {
+                "url": "https://i.imgur.com/pFbQrWe.png"
+            }
+        },
         "properties": {
             "Status": {"status": {"name": status}}
         }
@@ -249,7 +254,7 @@ async def update_lead_status(page_id, status="Reunião Realizada"):
         async with httpx.AsyncClient() as client:
             response = await client.patch(update_url, json=update_data, headers=notion_headers())
             response.raise_for_status()
-            logger.info("Successfully updated lead status")
+            logger.info("Successfully updated lead status and icon")
     except Exception as e:
         logger.error(f"Error updating lead status: {str(e)}")
         raise
